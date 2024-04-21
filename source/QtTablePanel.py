@@ -246,7 +246,8 @@ height: 0px;
             scale_factor = self.activeImg.pixelSize()
             area = round(blob.area * (scale_factor) * (scale_factor) / 100, 2)
             new_row = {'Id': blob.id, 'Class': blob.class_name, 'Area': area, 'Confidence': blob.confidence}
-            self.data = self.data.append(new_row, ignore_index=True)
+            new_row_df = pd.DataFrame([new_row])  # Convert dictionary to DataFrame
+            self.data = pd.concat([self.data, new_row_df], ignore_index=True)
 
             # index is recalculated so that index i corresponds to row i
             self.data.reset_index(drop=True, inplace=True)

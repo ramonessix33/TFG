@@ -33,13 +33,17 @@ import platform
 import cv2 as cv
 from skimage.feature import peak_local_max
 from skimage import data, img_as_float
+from diffusers.utils import load_image
+import PIL
 
 
 from PyQt5.QtCore import Qt, QSize, QMargins, QDir, QPoint, QPointF, QRectF, QTimer, pyqtSlot, pyqtSignal, QSettings, QFileInfo, QModelIndex
-from PyQt5.QtGui import QFontDatabase, QFont, QPixmap, QIcon, QKeySequence, QPen, QImageReader, QImage
+from PyQt5.QtGui import QFontDatabase, QFont, QPixmap, QIcon, QKeySequence, QPen, QImageReader, QImage, QImageReader
 from PyQt5.QtWidgets import QApplication, QWidget, QMainWindow, QFileDialog, QComboBox, QMenuBar, QMenu, QSizePolicy, QScrollArea, \
     QLabel, QToolButton, QPushButton, QSlider, QCheckBox, \
-    QMessageBox, QGroupBox, QLayout, QHBoxLayout, QVBoxLayout, QFrame, QDockWidget, QTextEdit, QAction
+    QMessageBox, QGroupBox, QLayout, QHBoxLayout, QVBoxLayout, QFrame, QDockWidget, QTextEdit, QAction, QLineEdit, QDialog, QListWidget, QListWidgetItem
+
+import re
 
 import pprint
 
@@ -86,6 +90,8 @@ from source.QtShapefileAttributeWidget import QtAttributeWidget
 from source.QtPanelInfo import QtPanelInfo
 from source.DecayAnnotation import DecayAnnotation
 from source.QtColorAnnotationSettingsWidget import QtColorAnnotationSettingsWidget
+from source.QtInpaintingDialogWidget import InpaintingWindow
+from source.QtImagesWidget import QtImagesWidget
 
 from source import utils
 from source.Blob import Blob
@@ -109,6 +115,7 @@ logfile = logging.getLogger("tool-logger")
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super(MainWindow, self).__init__(parent)
+        self.cleanImageFolder
         pass
     def closeEvent(self, event):
         taglab = self.centralWidget()
@@ -122,9 +129,18 @@ class MainWindow(QMainWindow):
 
             if reply == QMessageBox.Cancel:
                 event.ignore()
+                self.cleanImageFolder()
                 return
 
         super(MainWindow, self).closeEvent(event)
+        self.cleanImageFolder()
+
+    def cleanImageFolder(self):
+        image_folder = "images"
+        for filename in os.listdir(image_folder):
+            file_path = os.path.join(image_folder, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
 
 class TagLab(QMainWindow):
 
@@ -170,6 +186,8 @@ class TagLab(QMainWindow):
         self.recentFileActs = []  #refactor to self.maxRecentProjects
         self.maxRecentFiles = 0   #refactor to maxRecentProjects # added
         self.separatorRecentFilesAct = None    #refactor to separatorRecentFiles
+
+        self.numImages = 0 #Number of generated images
 
         ##### INTERFACE #####
         #####################
@@ -224,6 +242,7 @@ class TagLab(QMainWindow):
         self.btnDeepExtreme   = self.newButton("dexter.png",   "4-clicks segmentation",  flatbuttonstyle2, self.deepExtreme)
         self.btnRitm          = self.newButton("ritm.png",     "Positive/negative clicks segmentation", flatbuttonstyle2, self.ritm)
         self.btnAutoClassification = self.newButton("auto.png", "Fully auto semantic segmentation", flatbuttonstyle2, self.selectClassifier)
+        self.btnInpainting = self.newButton("inpainting.png", "Inpainting", flatbuttonstyle1, self.openInpaintingWindow)
 
         # Split Screen operation removed from the toolbar
         self.pxmapSeparator = QPixmap("icons/separator.png")
@@ -234,12 +253,12 @@ class TagLab(QMainWindow):
         self.pxmapSeparator2 = QPixmap("icons/separator.png")
         self.labelSeparator2 = QLabel()
         self.labelSeparator2.setPixmap(self.pxmapSeparator2.scaled(QSize(35, 30)))
-        
+
         self.pxmapSeparator3 = QPixmap("icons/separator.png")
         self.labelSeparator3 = QLabel()
         self.labelSeparator3.setPixmap(self.pxmapSeparator3.scaled(QSize(35, 30)))
 
-        
+
 
         self.btnSplitScreen = self.newButton("split.png", "Split screen", flatbuttonstyle1, self.toggleComparison)
         self.btnAutoMatch = self.newButton("automatch.png", "Compute automatic matches", flatbuttonstyle1, self.autoCorrespondences)
@@ -266,11 +285,13 @@ class TagLab(QMainWindow):
         layout_tools.addWidget(self.btnAssign)
         #layout_tools.addWidget(self.btnWatershed)
         #layout_tools.addWidget(self.btnBricksSegmentation)
-        
+
         #layout_tools.addWidget(self.btnCreateCrack) # removed
         #layout_tools.addWidget(self.btnSplitBlob)
         #layout_tools.addWidget(self.btnRuler) # removed
         layout_tools.addWidget(self.btnAutoClassification)
+        layout_tools.addSpacing(3)
+        layout_tools.addWidget(self.btnInpainting)
         layout_tools.addSpacing(3)
         layout_tools.addWidget(self.labelSeparator)
         layout_tools.addSpacing(3)
@@ -433,6 +454,9 @@ class TagLab(QMainWindow):
         layout_main_view.addLayout(layout_viewers)
 
         ##### LAYOUT - labels + blob info + navigation map
+        # IMAGE PANEL
+        self.images_widget = QtImagesWidget()
+        self.images_widget.showImage.connect(self.displaySelectedImage)
 
         # LAYERS PANEL
 
@@ -448,7 +472,7 @@ class TagLab(QMainWindow):
         self.labels_widget = QtTableLabel()
         self.default_dictionary = self.settings_widget.settings.value("default-dictionary",
                                                 defaultValue="dictionaries/default_dictionary.json", type=str)
-        
+
         #self.project.loadDictionary(self.default_dictionary)
         #self.labels_widget.setLabels(self.project, None, None)
 
@@ -519,6 +543,13 @@ class TagLab(QMainWindow):
 
 
         #DOCK
+        self.images_widget = QtImagesWidget()
+        self.imagesdock = QDockWidget("Images", self)
+        self.imagesdock.setWidget(self.images_widget)
+        self.images_widget.image_list.setIconSize(QSize(128, 128))
+        self.images_widget.setStyleSheet("padding: 0px")
+        self.images_widget.image_list.itemClicked.connect(self.displaySelectedImage)
+
         self.layersdock = QDockWidget("Maps and Layers", self)
         self.layersdock.setWidget(self.layers_widget)
         self.layers_widget.setStyleSheet("padding: 0px")
@@ -541,7 +572,7 @@ class TagLab(QMainWindow):
         self.mapdock.setWidget(self.mapviewer)
         self.mapdock.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.MinimumExpanding)
 
-        for dock in (self.layersdock, self.labelsdock, self.datadock, self.blobdock): #, self.mapdock):
+        for dock in (self.imagesdock, self.layersdock, self.labelsdock, self.datadock, self.blobdock): #, self.mapdock):
             dock.setAllowedAreas(Qt.RightDockWidgetArea)
             self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
@@ -1164,6 +1195,7 @@ class TagLab(QMainWindow):
 
 
         self.viewmenu = menubar.addMenu("&View")
+        self.viewmenu.addAction(self.imagesdock.toggleViewAction())
         self.viewmenu.addAction(self.layersdock.toggleViewAction())
         self.viewmenu.addAction(self.labelsdock.toggleViewAction())
         self.viewmenu.addAction(self.blobdock.toggleViewAction())
@@ -1753,7 +1785,7 @@ class TagLab(QMainWindow):
 
         self.activeviewer = self.viewerplus
         self.updatePanelsWithoutAnnotations(changed=changed)
-        
+
         if  self.activeviewer.annotations is None:
             self.clearPanelsWithAnnotations()
         else:
@@ -1797,7 +1829,7 @@ class TagLab(QMainWindow):
             source_annotations = self.viewerplus.annotations
         elif self.viewerplus.image == self.project.images[index_to_set+1]:
             target_annotations = self.viewerplus.annotations
-        
+
         self.doNotUpdatePanels()
         self.viewerplus.clear()
         self.viewerplus.setProject(self.project)
@@ -1834,7 +1866,7 @@ class TagLab(QMainWindow):
         self.activeviewer = self.viewerplus
 
         if self.viewerplus.annotations is not None: # annotation panels already activated, just need to print blobs
-            self.showAnnotations(self.viewerplus.image, self.viewerplus.annotations, True) 
+            self.showAnnotations(self.viewerplus.image, self.viewerplus.annotations, True)
         elif self.viewerplus2.annotations is not None:
             self.showAnnotations(self.viewerplus2.image, self.viewerplus2.annotations, True)
 
@@ -2231,7 +2263,7 @@ class TagLab(QMainWindow):
 
         if swapped: # only in the swap there are annotations to load
             if self.viewerplus.annotations is not None: # annotation panels already activated, just need to print blobs
-                self.showAnnotations(self.viewerplus.image, self.viewerplus.annotations, True) 
+                self.showAnnotations(self.viewerplus.image, self.viewerplus.annotations, True)
             if self.viewerplus2.annotations is not None:
                 self.showAnnotations(self.viewerplus2.image, self.viewerplus2.annotations, True)
 
@@ -2273,7 +2305,7 @@ class TagLab(QMainWindow):
 
         if swapped: # only in the swap there are annotations to load
             if self.viewerplus.annotations is not None: # annotation panels already activated, just need to print blobs
-                self.showAnnotations(self.viewerplus.image, self.viewerplus.annotations, True) 
+                self.showAnnotations(self.viewerplus.image, self.viewerplus.annotations, True)
             if self.viewerplus2.annotations is not None:
                 self.showAnnotations(self.viewerplus2.image, self.viewerplus2.annotations, True)
 
@@ -2531,7 +2563,7 @@ class TagLab(QMainWindow):
         """
         if len(self.project.images) < 2:
             box = QMessageBox()
-            box.setText("This project has only a single map.")
+            box.setText("This project has only a single map")
             box.exec()
             self.move()
             return
@@ -3069,9 +3101,9 @@ class TagLab(QMainWindow):
         self.groupbox_blobpanel.region_attributes = self.project.region_attributes
 
         self.setMapToLoad()
-        
-        
-        
+
+
+
 
     @pyqtSlot()
     def editProject(self):
@@ -3098,8 +3130,8 @@ class TagLab(QMainWindow):
             self.mapWidget.setWindowModality(Qt.WindowModal)
             self.mapWidget.accepted.connect(self.setMapProperties)
             self.mapWidget.show()
-            
-            
+
+
 
         else:
 
@@ -3109,8 +3141,8 @@ class TagLab(QMainWindow):
             self.mapWidget.accepted.connect(self.setMapProperties)
             if self.mapWidget.isHidden():
                 self.mapWidget.show()
-    
-        
+
+
 
     @pyqtSlot()
     def closeProjectEditor(self):
@@ -3131,16 +3163,16 @@ class TagLab(QMainWindow):
         showMessage = False
         message = ""
 
-        if self.split_screen_flag:   
+        if self.split_screen_flag:
             message = "Dictionary editor not enabled while split screen is activated"
             showMessage = True
-        elif self.activeviewer.image is None:    
+        elif self.activeviewer.image is None:
             message = "Unable to add a dictionary since there is no map selected"
             showMessage = True
-        elif self.activeviewer.annotations is None:   
+        elif self.activeviewer.annotations is None:
             message = "Unable to add a dictionary since there is no annotation selected"
             showMessage = True
-        elif type(self.activeviewer.annotations) is DecayAnnotation :   
+        elif type(self.activeviewer.annotations) is DecayAnnotation :
             message = "Decay annotations can't change their labels"
             showMessage = True
         if showMessage:
@@ -3148,7 +3180,7 @@ class TagLab(QMainWindow):
             msgBox.setWindowTitle(self.TAGLAB_VERSION)
             msgBox.setText(message)
             msgBox.exec()
-            return 
+            return
 
         self.dictionary_widget = QtDictionaryWidget(self.taglab_dir, self.project, parent = self)
         self.dictionary_widget.loadlabels.connect(self.addLabelDictionary)
@@ -3331,7 +3363,7 @@ class TagLab(QMainWindow):
             if self.activeviewer.image is not None:
                 image = self.activeviewer.image
 
-        
+
 
         # update layers
         if self.split_screen_flag is False:
@@ -3345,7 +3377,7 @@ class TagLab(QMainWindow):
         # update map viewer
         if self.mapviewer.isVisible():
             w = self.mapviewer.width()
-            #thumb = self.activeviewer.pixmap.scaled(w, w, Qt.KeepAspectRatio, Qt.SmoothTransformation) #TODO esto peta 
+            #thumb = self.activeviewer.pixmap.scaled(w, w, Qt.KeepAspectRatio, Qt.SmoothTransformation) #TODO esto peta
             #self.mapviewer.setPixmap(thumb)
             self.mapviewer.setOpacity(0.5)
 
@@ -3356,13 +3388,13 @@ class TagLab(QMainWindow):
     def clearPanelsWithAnnotations(self):
         if self.split_screen_flag is True:
             self.compare_panel.clear()
-        
+
         self.labels_widget.clear()
 
         self.data_panel.clear()
 
         self.resetPanelInfo()
-     
+
     def updatePanelsWithAnnotations(self, viewerChanged = None):
 
         image = None
@@ -3615,7 +3647,7 @@ class TagLab(QMainWindow):
                     self.clearPanelsWithAnnotations()
                 else:
                     self.updatePanelsWithAnnotations(viewerChanged)
-                
+
 
 
         except Exception as e:
@@ -4086,6 +4118,7 @@ class TagLab(QMainWindow):
                     filename += '.png'
 
                 size = QSize(self.activeviewer.image.width, self.activeviewer.image.height)
+                self.project.labels = self.activeviewer.annotations.labels
                 self.activeviewer.annotations.export_image_data_for_Scripps(size, filename, self.project)
 
                 msgBox = QMessageBox(self)
@@ -4513,6 +4546,7 @@ class TagLab(QMainWindow):
             #annotations = image.decayLayers[0]
             self.showImage(image)
             self.move()
+            #self.addImagesToImagesWidget(self.project.images)
 
         self.updateImageSelectionMenu()
 
@@ -4600,12 +4634,12 @@ class TagLab(QMainWindow):
             self.move()
             return
 
-        if self.activeviewer.annotations is None:      
+        if self.activeviewer.annotations is None:
             msgBox = QMessageBox()
             msgBox.setWindowTitle(self.TAGLAB_VERSION)
             msgBox.setText("Unable to use the tool since there is no annotation selected")
             msgBox.exec()
-            return 
+            return
 
         if self.available_classifiers == "None":
             self.btnAutoClassification.setChecked(False)
@@ -4811,7 +4845,7 @@ class TagLab(QMainWindow):
 
                     offset = self.classifier.offset
                     scale = [self.classifier.scale_factor, self.classifier.scale_factor]
-                    
+
                     created_blobs = self.activeviewer.annotations.import_label_map(filenameLabels, filenameScores, self.activeviewer.annotations.labels,
                                                                                    offset, scale, progress=self.progress_bar)
                     for blob in created_blobs:
@@ -4842,6 +4876,64 @@ class TagLab(QMainWindow):
                     gc.collect()
 
                     self.move()
+
+    #Inpainting mod
+    def openInpaintingWindow(self):
+        #self.addImagesToImagesWidget([self.getImageQT()])
+        self.inpaintingWindow = InpaintingWindow(self)
+        self.inpaintingWindow.show()
+
+    def getImageQT(self):
+        im = self.activeviewer.image.getRGBChannel().qimage
+        return im
+        #im.save('imatge.png','png')
+
+    def getImageDiff(self):
+        im = load_image(self.activeviewer.image.getRGBChannel().save()['filename']).convert("RGB").resize((1024, 1024))
+        return im
+        #im.save('imatge.png','png')
+
+    def getLabelBinaryImage(self):
+        size = (QSize(self.activeviewer.image.width, self.activeviewer.image.height))
+        label_map = self.activeviewer.annotations.create_label_binary_image(size=size, labels_dictionary=self.activeviewer.annotations.labels, ignore ='not degraded')
+        im = PIL.Image.fromarray(label_map).convert("RGB").resize((1024, 1024))
+        #im.save('binari1.png', 'png')
+        return im
+
+
+    def displaySelectedImage(self, item):
+        if item is not None:
+            file_path = item.data(Qt.UserRole)
+            image = QImage(file_path)
+
+            if not image.isNull():
+                self.viewerplus.setImg(image)
+            else:
+                print(f"Failed to load image: {file_path}")
+
+    def addImagesToImagesWidget(self, images):
+        for image in images:
+            filename = f"images/image_{self.numImages}.png"
+            print(image)
+            image.save(filename)  # Save the image to a file
+
+            # Create a QIcon from the saved image file
+            icon = QIcon(filename)
+
+            # Create a QListWidgetItem with the icon
+            item = QListWidgetItem()
+            item.setIcon(icon)
+
+            # Set the text of the item to an empty string
+            item.setText("")
+
+            # Set the image file path as data for the item
+            item.setData(Qt.UserRole, filename)
+
+            # Add the item to the QListWidget inside the images_widget
+            self.images_widget.image_list.addItem(item)
+
+            self.numImages = self.numImages + 1
 
 
 if __name__ == '__main__':

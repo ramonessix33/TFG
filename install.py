@@ -248,7 +248,7 @@ else:
     subprocess.check_call([sys.executable, "-m", "pip", "install", filename_gdal])
     subprocess.check_call([sys.executable, "-m", "pip", "install", filename_rasterio])
 
-    #delete wheel files
+    delete wheel files
     os.remove(this_directory + '/' + filename_gdal)
     os.remove(this_directory + '/' + filename_rasterio)
 

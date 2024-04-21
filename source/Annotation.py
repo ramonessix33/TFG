@@ -1078,6 +1078,35 @@ window.my.target.selector
         label_map = self.create_label_map(size, labels_dictionary=project.labels, working_area=project.working_area)
         label_map.save(filename, 'png')
 
+    #Returns a white/black image where every white pixel is part of a label and black pixels aren't
+    def create_label_binary_image(self, size, labels_dictionary=None, ignore=None):
+        w = size.width()
+        h = size.height()
+
+        imagebox = [0, 0, h, w]
+        image = np.zeros([h, w, 3], np.uint8)
+
+        for blob in self.seg_blobs:
+            if blob.class_name == ignore:
+                continue
+
+            mask = blob.getMask().astype(bool)  # bool is required for bitmask indexing
+            box = blob.bbox.copy()  # blob.bbox is top, left, width, height
+            (box[2], box[3]) = (box[3] + box[0], box[2] + box[1])  # box is now startx, starty, endx, endy
+
+            #range is the interection of box and imagebox
+            range = [max(box[0], imagebox[0]), max(box[1], imagebox[1]), min(box[2], imagebox[2]), min(box[3], imagebox[3])]
+            subimage = image[range[0] - imagebox[0]:range[2] - imagebox[0], range[1] - imagebox[1]:range[3] - imagebox[1]]
+            submask = mask[range[0] - box[0]:range[2] - box[0], range[1] - box[1]:range[3] - box[1]]
+
+            #use the binary mask to assign a color
+            subimage[submask] = [255, 255, 255]
+
+
+        #label_map = utils.rgbToQImage(image)
+
+        return image
+
 def updateProgressBar(progress_bar, prefix_message, num_iter, total_iter):
     """
     Update progress bar according to the number of iterations done.
